@@ -4,10 +4,10 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Form, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 
-from app.auth.models import Token
-from app.users.crud import get_user_by_email
-from app.users.models import UserResponse
-from app.utils.auth import (
+from app.crud import get_user_by_email
+from app.models.auth import Token
+from app.models.user import UserResponse
+from app.services.auth import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
     authenticate_user,
     create_access_token,

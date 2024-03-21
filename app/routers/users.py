@@ -3,9 +3,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.users import crud
-from app.users.models import User, UserResponse, UsersResponse
-from app.utils.auth import get_current_user
+from app import crud
+from app.models.user import User, UserResponse, UsersResponse
+from app.services.auth import get_current_user
 
 router = APIRouter()
 

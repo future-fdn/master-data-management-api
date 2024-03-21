@@ -11,19 +11,19 @@ from sqlalchemy import delete, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from thefuzz import fuzz
 
-from app.config import settings
-from app.db import engine
-from app.db.base import get_session
-from app.files.models import File, FileResponse, FilesResponse
-from app.tasks.models import Task
-from app.users.models import User
-from app.utils.auth import get_current_user
+from app.config import get_settings
+from app.db import get_session
+from app.models.file import File, FileResponse, FilesResponse
+from app.models.task import Task
+from app.models.user import User
+from app.services.auth import get_current_user
 
 router = APIRouter()
+settings = get_settings()
 
 aws_session = boto3.Session(
-    aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-    aws_secret_access_key=settings.AWS_ACCESS_KEY,
+    aws_access_key_id=settings.aws_access_key_id,
+    aws_secret_access_key=settings.aws_access_key,
 )
 s3 = aws_session.resource("s3")
 client = aws_session.client("s3")
@@ -306,19 +306,17 @@ async def map_data(df: pd.DataFrame, master_df, query_column, master_column, fil
             buffer.read(65535), "mdmfiles", file.type.title() + "/" + file.file_name
         )
 
-    async with engine.get_async_session() as session:
-        await session.scalar(
-            update(Task)
-            .where(file_id=file.id, modified=datetime.now())
-            .values("COMPLETED")
+    session = await get_session()
+    await session.scalar(
+        update(Task).where(file_id=file.id, modified=datetime.now()).values("COMPLETED")
+    )
+    await session.scalar(
+        insert(File).values(
+            unique=df[query_column].unique().shape[1],
+            valid=int(df[query_column].count()),
         )
-        await session.scalar(
-            insert(File).values(
-                unique=df[query_column].unique().shape[1],
-                valid=int(df[query_column].count()),
-            )
-        )
-        await session.commit()
+    )
+    await session.commit()
 
     del df
     del master_df

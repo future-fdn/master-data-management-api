@@ -1,10 +1,23 @@
-from dynaconf import Dynaconf
+from functools import lru_cache
 
-settings = Dynaconf(
-    settings_files=[".settings.toml", ".secrets.toml"],
-    envvar_prefix="APP",
-    env_switcher="APP_APP_ENV",
-    dotenv_path=".env",
-    load_dotenv=True,
-    environments=True,
-)
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    postgres_server: str
+    postgres_port: int
+    postgres_user: str
+    postgres_db: str
+    postgres_password: str
+
+    aws_access_key_id: str
+    aws_access_key: str
+
+    secret: str
+
+    model_config = SettingsConfigDict(env_file=".env")
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

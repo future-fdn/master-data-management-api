@@ -5,13 +5,14 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
-from app.auth.models import TokenData
-from app.users.crud import add_new_user, get_user, get_user_by_email
-from app.users.models import User
+from app.config import get_settings
+from app.crud import add_new_user, get_user, get_user_by_email
+from app.models.auth import TokenData
+from app.models.user import User
 
-# to get a string like this run:
-# openssl rand -hex 32
-SECRET_KEY = "814c050e7f0ce306cec9b74c72c30f2a0b546e8e8de214dc04bdb0ebe50e8080"
+settings = get_settings()
+
+SECRET_KEY = settings.secret
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 

@@ -1,15 +1,27 @@
 import asyncio
 from logging.config import fileConfig
 
-from sqlalchemy import Connection, engine_from_config, pool
+from asyncpg import Connection
+from sqlalchemy import URL, engine_from_config, pool
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from alembic import context
-from app.config import settings
+from app.config import get_settings
 
+settings = get_settings()
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+
+
+connect_url = URL.create(
+    "postgresql+asyncpg",
+    username=settings.postgres_user,
+    password=settings.postgres_password,
+    host=settings.postgres_server,
+    port=settings.postgres_port,
+    database=settings.postgres_db,
+)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
@@ -68,9 +80,9 @@ async def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    configuration = config.get_section(config.config_ini_section)
+    configuration = config.get_section(config.config_ini_section, {})
     assert configuration
-    configuration["sqlalchemy.url"] = settings.DB_URI
+    configuration["sqlalchemy.url"] = connect_url
     connectable = AsyncEngine(
         engine_from_config(
             configuration,
