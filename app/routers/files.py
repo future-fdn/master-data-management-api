@@ -1,18 +1,18 @@
+import io
 from datetime import datetime
-from io import BytesIO
 from typing import Annotated, Literal, Union
 from uuid import UUID
 
 import boto3
 import pandas as pd
-from anyio import Path
+import requests
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, status
 from sqlalchemy import delete, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from thefuzz import fuzz
 
 from app.config import get_settings
-from app.db import get_session
+from app.db import get_async_session, get_session
 from app.models.file import File, FileResponse, FilesResponse
 from app.models.task import Task
 from app.models.user import User
@@ -26,24 +26,55 @@ aws_session = boto3.Session(
     aws_secret_access_key=settings.aws_access_key,
 )
 s3 = aws_session.resource("s3")
-client = aws_session.client("s3")
-bucket = s3.Bucket("mdmfiles")
+client = aws_session.client("s3")  # , endpoint_url="https://cdn.future-fdn.tech")
+bucket = s3.Bucket("cdn.future-fdn.tech")
 
 
 @router.get("/files/{file_id}", response_model=Union[FilesResponse | FileResponse])
 async def get_specific_files(
     file_id: UUID | Literal["master", "query"],
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+    limit: int = 10,
+    offset: int = 0,
 ):
     files = []
     url = None
 
     if file_id == "master":
-        obj_list = bucket.objects.filter(Prefix="Master/")
+        if current_user.role != "ADMIN":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden"
+            )
+
+        all_files = await session.scalars(
+            select(File).where(File.type == "MASTER").limit(limit).offset(offset)
+        )
     elif file_id == "query":
-        obj_list = bucket.objects.filter(Prefix="Query/")
+        all_files = await session.scalars(
+            select(File)
+            .where(File.user_id == current_user.id)
+            .where(File.type == "QUERY")
+            .limit(limit)
+            .offset(offset)
+        )
+    elif not file_id:
+        if current_user.role != "ADMIN":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden"
+            )
+
+        all_files = await session.scalars(select(File).limit(limit).offset(offset))
     else:
-        file = await session.scalar(select(File).where(File.id == file_id))
+        file = await session.scalar(
+            select(File).where(File.id == file_id).limit(limit).offset(offset)
+        )
+
+        if current_user.id != file.user_id and current_user.role != "ADMIN":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden"
+            )
+
         obj = [
             x
             for x in bucket.objects.filter(
@@ -51,14 +82,14 @@ async def get_specific_files(
             )
         ][0]
 
-        if not url:
-            url = client.generate_presigned_url(
-                "get_object",
-                ExpiresIn=3600,
-                Params={"Bucket": "mdmfiles", "Key": obj.key},
-            )
+        url = client.generate_presigned_url(
+            "get_object",
+            ExpiresIn=3600,
+            Params={"Bucket": "cdn.future-fdn.tech", "Key": obj.key},
+        ).replace("s3.amazonaws.com/", "")
+
         # versions = client.list_object_versions(
-        #     Bucket="mdmfiles", Prefix=file.type.title() + "/" + file.file_name
+        #     Bucket="cdn.future-fdn.tech", Prefix=file.type.title() + "/" + file.file_name
         # )
 
         file = file.to_dict()
@@ -79,25 +110,22 @@ async def get_specific_files(
 
         return file
 
-    for obj in obj_list:
-        if obj.get()["ContentType"].startswith("application/x-directory"):
+    for file in all_files:
+        obj = list(
+            bucket.objects.filter(Prefix=file.type.title() + "/" + file.file_name)
+        )[0]
+
+        if not obj:
             continue
 
-        file = await session.scalar(
-            select(File).where(File.file_name == Path(obj.key).name)
-        )
+        url = client.generate_presigned_url(
+            "get_object",
+            ExpiresIn=3600,
+            Params={"Bucket": "cdn.future-fdn.tech", "Key": obj.key},
+        ).replace("s3.amazonaws.com/", "")
 
-        if not file:
-            continue
-
-        if not url:
-            url = client.generate_presigned_url(
-                "get_object",
-                ExpiresIn=3600,
-                Params={"Bucket": "mdmfiles", "Key": obj.key},
-            )
         # versions = client.list_object_versions(
-        #     Bucket="mdmfiles", Prefix=file.type.title() + "/" + file.file_name
+        #     Bucket="cdn.future-fdn.tech", Prefix=file.type.title() + "/" + file.file_name
         # )
 
         file = file.to_dict()
@@ -155,31 +183,31 @@ async def delete_specific_files(
 
 
 @router.get("/files", response_model=FilesResponse)
-async def get_all_file(session: AsyncSession = Depends(get_session)):
+async def get_all_files(
+    session: AsyncSession = Depends(get_session),
+    limit: int = 10,
+    offset: int = 0,
+):
     files = []
     url = None
 
-    obj_list = bucket.objects.all()
+    all_files = await session.scalars(select(File).limit(limit).offset(offset))
 
-    for obj in obj_list:
-        if obj.get()["ContentType"].startswith("application/x-directory"):
+    for file in all_files:
+        obj = list(
+            bucket.objects.filter(Prefix=file.type.title() + "/" + file.file_name)
+        )[0]
+
+        if not obj:
             continue
 
-        file = await session.scalar(
-            select(File).where(File.file_name == Path(obj.key).name)
-        )
-
-        if not file:
-            continue
-
-        if not url:
-            url = client.generate_presigned_url(
-                "get_object",
-                ExpiresIn=3600,
-                Params={"Bucket": "mdmfiles", "Key": obj.key},
-            )
+        url = client.generate_presigned_url(
+            "get_object",
+            ExpiresIn=3600,
+            Params={"Bucket": "cdn.future-fdn.tech", "Key": obj.key},
+        ).replace("s3.amazonaws.com/", "")
         # versions = client.list_object_versions(
-        #     Bucket="mdmfiles", Prefix=file.type.title() + "/" + file.file_name
+        #     Bucket="cdn.future-fdn.tech", Prefix=file.type.title() + "/" + file.file_name
         # )
 
         file = file.to_dict()
@@ -238,15 +266,18 @@ async def map_file(
             "get_object",
             ExpiresIn=3600,
             Params={
-                "Bucket": "mdmfiles",
+                "Bucket": "cdn.future-fdn.tech",
                 "Key": file.type.title() + "/" + file.file_name,
             },
-        )
+        ).replace("s3.amazonaws.com/", "")
 
         if file.file_name.endswith(".csv"):
-            df = pd.read_csv(url)
+            response = requests.get(url)
+
+            df = pd.read_csv(io.StringIO(response.content.decode("utf-8")))
         elif file.file_name.endswith(".txt"):
-            df = pd.read_fwf(url, header=None)
+            response = requests.get(url)
+            df = pd.read_fwf(io.StringIO(response.content.decode("utf-8")), header=None)
         else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -260,7 +291,7 @@ async def map_file(
 
     task = await session.scalar(
         insert(Task)
-        .values(file_id=file.id, user_id=current_user.id, type="PENDING")
+        .values(file_id=file.id, user_id=current_user.id, status="PENDING")
         .returning(Task)
     )
 
@@ -270,6 +301,8 @@ async def map_file(
             detail="There was an error creating the task",
         )
 
+    await session.commit()
+
     background_tasks.add_task(
         map_data, df, master_df, query_column, master_column, file
     )
@@ -278,44 +311,117 @@ async def map_file(
 
 
 async def map_data(df: pd.DataFrame, master_df, query_column, master_column, file):
+    session = get_async_session()
+
     for col in master_df.columns:
         if col.startswith("Unnamed"):
             del master_df[col]
 
-    if not any(master_column in master_df.columns):
-        ...
-    if not any(query_column in df.columns):
-        ...  # TODO: Error
+    if not master_df.columns.isin(
+        [master_column if not master_column.isnumeric() else int(master_column)]
+    ).any():
+        await session.scalar(
+            update(Task)
+            .where(Task.file_id == file.id)
+            .values(status="FAILED")
+            .returning(Task)
+        )
 
-    for i, row in enumerate(df[query_column].rows):
-        partial = master_df[master_column].apply(lambda x: (fuzz.partial_ratio(x, row)))
-        full = master_df[master_column].apply(lambda x: (fuzz.ratio(x, row)))
+        return
+
+    if not df.columns.isin(
+        [query_column if not query_column.isnumeric() else int(query_column)]
+    ).any():
+        await session.scalar(
+            update(Task)
+            .where(Task.file_id == file.id)
+            .values(status="FAILED", ended=datetime.now())
+            .returning(Task)
+        )
+
+        return
+
+    data = []
+
+    for i, row in enumerate(
+        df[query_column if not query_column.isnumeric() else int(query_column)]
+    ):
+        partial = master_df[
+            master_column if not master_column.isnumeric() else int(master_column)
+        ].apply(lambda x: (fuzz.partial_ratio(x, row)))
+        full = master_df[
+            master_column if not master_column.isnumeric() else int(master_column)
+        ].apply(lambda x: (fuzz.ratio(x, row)))
 
         if full.max() > 90:
-            df[query_column][i] = master_df[master_column][partial.idxmax()]
+            data.append(
+                [
+                    df[
+                        query_column
+                        if not query_column.isnumeric()
+                        else int(query_column)
+                    ][i],
+                    master_df[
+                        master_column
+                        if not master_column.isnumeric()
+                        else int(master_column)
+                    ][partial.idxmax()],
+                    partial.max(),
+                    full.max(),
+                ]
+            )
         elif partial.max() > 90:
-            df[query_column][i] = master_df[master_column][partial.idxmax()]
+            data.append(
+                [
+                    df[
+                        query_column
+                        if not query_column.isnumeric()
+                        else int(query_column)
+                    ][i],
+                    master_df[
+                        master_column
+                        if not master_column.isnumeric()
+                        else int(master_column)
+                    ][partial.idxmax()],
+                    partial.max(),
+                    full.max(),
+                ]
+            )
         else:
-            df[query_column][i] = master_df[master_column][partial.idxmax()]
+            data.append(
+                [
+                    df[
+                        query_column
+                        if not query_column.isnumeric()
+                        else int(query_column)
+                    ][i],
+                    master_df[
+                        master_column
+                        if not master_column.isnumeric()
+                        else int(master_column)
+                    ][partial.idxmax()],
+                    partial.max(),
+                    full.max(),
+                ]
+            )
 
-    buffer = BytesIO()
-    df.to_csv(buffer, index=False)
-
-    while buffer.readable():
-        client.upload_fileobj(
-            buffer.read(65535), "mdmfiles", file.type.title() + "/" + file.file_name
-        )
-
-    session = await get_session()
-    await session.scalar(
-        update(Task).where(file_id=file.id, modified=datetime.now()).values("COMPLETED")
+    resulting_df = pd.DataFrame(
+        data, columns=["source", "destination", "partial", "full"]
     )
-    await session.scalar(
-        insert(File).values(
-            unique=df[query_column].unique().shape[1],
-            valid=int(df[query_column].count()),
-        )
+    buffer = io.BytesIO(resulting_df.to_csv(index=False).encode())
+    client.upload_fileobj(
+        buffer,
+        "cdn.future-fdn.tech",
+        "result" + "/" + file.file_name,
     )
+
+    await session.scalar(
+        update(Task)
+        .where(Task.file_id == file.id)
+        .values(ended=datetime.now(), status="COMPLETED")
+        .returning(Task)
+    )
+
     await session.commit()
 
     del df

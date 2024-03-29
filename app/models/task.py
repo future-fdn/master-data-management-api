@@ -32,8 +32,9 @@ class Task(Base):
     user_id: Mapped[str] = mapped_column(
         Uuid(as_uuid=False), nullable=False, unique=True
     )
-    type: Mapped[Type] = mapped_column(
-        Enum("PENDING", "IN_PROGRESS", "COMPLETED", name="task_status"), nullable=False
+    status: Mapped[Type] = mapped_column(
+        Enum("PENDING", "IN_PROGRESS", "COMPLETED", "FAILED", name="task_status"),
+        nullable=False,
     )
 
     def to_dict(self):
@@ -43,12 +44,14 @@ class Task(Base):
 class TaskResponse(BaseModel):
     id: uuid.UUID
     file_id: uuid.UUID
+    file_name: str
     user_id: uuid.UUID
-    type: str
+    user_name: str
+    status: str
     started: datetime
     ended: datetime
 
 
 class TasksResponse(BaseModel):
-    files: List[TaskResponse]
+    tasks: List[TaskResponse]
     total: int

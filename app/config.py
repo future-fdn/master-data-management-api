@@ -15,6 +15,8 @@ class Settings(BaseSettings):
 
     secret: str
 
+    origin: list
+
     model_config = SettingsConfigDict(env_file=".env")
 
 
