@@ -41,6 +41,17 @@ async def get_all_tasks(
         task["file_name"] = file.file_name
         task["user_name"] = user.name
 
+        task["url"] = client.generate_presigned_url(
+            "get_object",
+            ExpiresIn=3600,
+            Params={
+                "Bucket": "storage.future-fdn.tech",
+                "Key": file.type.title()
+                if file.type.lower() != "result"
+                else file.type.lower() + "/" + file.file_name,
+            },
+        ).replace("s3.amazonaws.com/", "")
+
         to_return.append(task)
 
     return {"tasks": to_return, "total": await count}
@@ -57,6 +68,27 @@ async def get_task(
     task = await session.scalar(
         select(Task).where(Task.id == task_id).limit(limit).offset(offset)
     )
+
+    if current_user.id != task.user_id and current_user.role != "ADMIN":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+
+    file = await session.scalar(select(File).where(File.id == Task.file_id))
+
+    if not file:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+
+    task["url"] = client.generate_presigned_url(
+        "get_object",
+        ExpiresIn=3600,
+        Params={
+            "Bucket": "storage.future-fdn.tech",
+            "Key": file.type.title()
+            if file.type.lower() != "result"
+            else file.type.lower() + "/" + file.file_name,
+        },
+    ).replace("s3.amazonaws.com/", "")
+    task["file_name"] = file.name
+    task["user_name"] = current_user.name
 
     return task
 

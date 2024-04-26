@@ -176,11 +176,7 @@ async def get_specific_files(
         return {"datas": return_list}
 
     elif file_id == "master":
-        if current_user.role != "ADMIN":
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden"
-            )
-
+        print("sdfsdf")
         all_files = await session.scalars(
             select(File).where(File.type == "MASTER").limit(limit).offset(offset)
         )

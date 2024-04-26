@@ -50,6 +50,7 @@ class TaskResponse(BaseModel):
     status: str
     started: datetime
     ended: datetime
+    url: str
 
 
 class TasksResponse(BaseModel):
