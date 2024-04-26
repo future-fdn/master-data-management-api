@@ -44,18 +44,33 @@ def read_file(file: File, is_csv=None) -> pd.DataFrame:
         ExpiresIn=3600,
         Params={
             "Bucket": "storage.future-fdn.tech",
-            "Key": file.type.title()
+            "Key": file.type.title() + "/" + file.file_name
             if file.type.lower() != "result"
             else file.type.lower() + "/" + file.file_name,
         },
     ).replace("s3.amazonaws.com/", "")
 
+    new_url = client.generate_presigned_url(
+        "get_object",
+        ExpiresIn=3600,
+        Params={
+            "Bucket": "storage.future-fdn.tech",
+            "Key": file.type.title() + "/" + f"{file.id}_{file.file_name}"
+            if file.type.lower() != "result"
+            else file.type.lower() + "/" + f"{file.id}_{file.file_name}",
+        },
+    ).replace("s3.amazonaws.com/", "")
+
     if file.file_name.endswith(".csv") or is_csv:
         response = requests.get(url)
+        if not response.ok:
+            response = requests.get(url)
 
         df = pd.read_csv(io.StringIO(response.content.decode("utf-8")))
     elif file.file_name.endswith(".txt"):
         response = requests.get(url)
+        if not response.ok:
+            response = requests.get(url)
         df = pd.read_fwf(io.StringIO(response.content.decode("utf-8")), header=None)
     else:
         raise HTTPException(
