@@ -12,6 +12,7 @@ class Settings(BaseSettings):
 
     aws_access_key_id: str
     aws_access_key: str
+    aws_storage_bucket_name: str
 
     secret: str
 

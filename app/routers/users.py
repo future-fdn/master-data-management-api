@@ -2,8 +2,11 @@ from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud
+from app.db import get_session
 from app.models.user import User, UserResponse, UsersResponse
 from app.services.auth import get_current_user
 
@@ -51,12 +54,18 @@ async def delete_user_by_id(
 
 @router.get("/users", response_model=UsersResponse)
 async def get_users(
+    session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
+    limit: int = 10,
+    offset: int = 0,
 ) -> Any:
     if current_user.role != "ADMIN":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
 
-    users = await crud.get_users()
+    users = await session.scalars(select(User).limit(limit).offset(offset))
+
+    count = await session.scalar(select(func.count()).select_from(User))
+
     users_list = list(users)
     count = len(users_list)
 

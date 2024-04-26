@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import List
 
 from pydantic import BaseModel
-from sqlalchemy import DateTime, Enum, Integer, String, Uuid, func
+from sqlalchemy import Date, DateTime, Enum, Float, Integer, String, Uuid, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -35,8 +35,27 @@ class File(Base):
     unique: Mapped[int] = mapped_column(Integer(), nullable=False)
     valid: Mapped[int] = mapped_column(Integer(), nullable=False)
     type: Mapped[Type] = mapped_column(
-        Enum("MASTER", "QUERY", name="file_type"), nullable=False
+        Enum("MASTER", "QUERY", "RESULT", name="file_type"), nullable=False
     )
+
+    def to_dict(self):
+        return {field.name: getattr(self, field.name) for field in self.__table__.c}
+
+
+class DQBase(DeclarativeBase): ...
+
+
+class DataQuality(DQBase):
+    __tablename__ = "data_quality"
+
+    date: Mapped[Date] = mapped_column(
+        Date(),
+        primary_key=True,
+    )
+    overall_uniqueness: Mapped[float] = mapped_column(Float())
+    overall_completeness: Mapped[float] = mapped_column(Float())
+    total_query_records: Mapped[int] = mapped_column(Integer())
+    total_master_records: Mapped[int] = mapped_column(Integer())
 
     def to_dict(self):
         return {field.name: getattr(self, field.name) for field in self.__table__.c}
@@ -60,9 +79,28 @@ class FileResponse(BaseModel):
     created: datetime
     modified: datetime
     url: str
-    # versions: List[Version]
+
+
+class FileStats(BaseModel):
+    overall_completeness: str
+    completeness_diff: str
+    overall_uniqueness: str
+    uniqueness_diff: str
+    total_query_records: int
+    query_records_diff: int
+    total_master_records: int
+    master_records_diff: int
 
 
 class FilesResponse(BaseModel):
     files: List[FileResponse]
     total: int
+
+
+class Graph(BaseModel):
+    date: str
+    value: int
+
+
+class GraphResponse(BaseModel):
+    datas: List[Graph]

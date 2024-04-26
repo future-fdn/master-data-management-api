@@ -1,5 +1,5 @@
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Literal, Union
 from uuid import UUID
 
@@ -7,13 +7,20 @@ import boto3
 import pandas as pd
 import requests
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, status
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import delete, func, insert, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from thefuzz import fuzz
 
 from app.config import get_settings
 from app.db import get_async_session, get_session
-from app.models.file import File, FileResponse, FilesResponse
+from app.models.file import (
+    DataQuality,
+    File,
+    FileResponse,
+    FilesResponse,
+    FileStats,
+    GraphResponse,
+)
 from app.models.task import Task
 from app.models.user import User
 from app.services.auth import get_current_user
@@ -25,14 +32,46 @@ aws_session = boto3.Session(
     aws_access_key_id=settings.aws_access_key_id,
     aws_secret_access_key=settings.aws_access_key,
 )
+
 s3 = aws_session.resource("s3")
 client = aws_session.client("s3")  # , endpoint_url="https://cdn.future-fdn.tech")
-bucket = s3.Bucket("cdn.future-fdn.tech")
+bucket = s3.Bucket("storage.future-fdn.tech")
 
 
-@router.get("/files/{file_id}", response_model=Union[FilesResponse | FileResponse])
+def read_file(file: File, is_csv=None) -> pd.DataFrame:
+    url = client.generate_presigned_url(
+        "get_object",
+        ExpiresIn=3600,
+        Params={
+            "Bucket": "storage.future-fdn.tech",
+            "Key": file.type.title()
+            if file.type.lower() != "result"
+            else file.type.lower() + "/" + file.file_name,
+        },
+    ).replace("s3.amazonaws.com/", "")
+
+    if file.file_name.endswith(".csv") or is_csv:
+        response = requests.get(url)
+
+        df = pd.read_csv(io.StringIO(response.content.decode("utf-8")))
+    elif file.file_name.endswith(".txt"):
+        response = requests.get(url)
+        df = pd.read_fwf(io.StringIO(response.content.decode("utf-8")), header=None)
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File type not supported",
+        )
+
+    return df
+
+
+@router.get(
+    "/files/{file_id}",
+    response_model=Union[FilesResponse | FileResponse | FileStats | GraphResponse],
+)
 async def get_specific_files(
-    file_id: UUID | Literal["master", "query"],
+    file_id: UUID | Literal["master", "query", "stats", "graph"],
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
     limit: int = 10,
@@ -41,7 +80,102 @@ async def get_specific_files(
     files = []
     url = None
 
-    if file_id == "master":
+    if file_id == "stats":
+        date = datetime.now().replace(day=1).date()
+        date_minus_one = (
+            (datetime.now() - timedelta(days=datetime.now().day)).replace(day=1).date()
+        )
+
+        info = await session.scalar(select(DataQuality).where(DataQuality.date == date))
+
+        return_values = {
+            "overall_uniqueness": format((info.overall_uniqueness) * 100.0, "00.0f")
+            + "%",
+            "overall_completeness": format((info.overall_completeness) * 100.0, "00.0f")
+            + "%",
+            "total_query_records": info.total_query_records,
+            "total_master_records": info.total_master_records,
+        }
+
+        info_previous = await session.scalar(
+            select(DataQuality).where(DataQuality.date == date_minus_one)
+        )
+
+        if info_previous:
+            return_values.update(
+                {
+                    "uniqueness_diff": format(
+                        (info.overall_uniqueness - info_previous.overall_uniqueness)
+                        * 100.0,
+                        "00.0f",
+                    )
+                    + "%",
+                    "completeness_diff": format(
+                        (info.overall_completeness - info_previous.overall_completeness)
+                        * 100,
+                        "00.0f",
+                    )
+                    + "%",
+                    "query_records_diff": info.total_query_records
+                    - info_previous.total_query_records,
+                    "master_records_diff": info.total_master_records
+                    - info_previous.total_master_records,
+                }
+            )
+        else:
+            return_values.update(
+                {
+                    "uniqueness_diff": "0%",
+                    "completeness_diff": "0%",
+                    "query_records_diff": 0,
+                    "master_records_diff": 0,
+                }
+            )
+
+        return_values.update(
+            {
+                "uniqueness_diff": "+" + return_values["uniqueness_diff"]
+                if not return_values["uniqueness_diff"].startswith("-")
+                else return_values["uniqueness_diff"],
+                "completeness_diff": "+" + return_values["completeness_diff"]
+                if not return_values["uniqueness_diff"].startswith("-")
+                else return_values["uniqueness_diff"],
+                "query_records_diff": 0,
+                "master_records_diff": 0,
+            }
+        )
+        return return_values
+    elif file_id == "graph":
+        date = datetime.now() - timedelta(days=365)
+        date = date.replace(day=1)
+        date_list = [date]
+
+        for i in range(12):
+            date_list.append((date_list[-1] + timedelta(days=31)).replace(day=1))
+
+        info = await session.scalars(
+            select(DataQuality).where(
+                or_(*[DataQuality.date == x.date() for x in date_list])
+            )
+        )
+        info = list(info)
+        return_list = []
+
+        for d in date_list:
+            data = None
+            for i in info:
+                if d.year == i.date.year and d.month == i.date.month:
+                    data = float(i.overall_completeness) * 100
+                    break
+
+            if not data:
+                data = 0.0
+
+            return_list.append({"date": str(d.date()), "value": str(int(data))})
+
+        return {"datas": return_list}
+
+    elif file_id == "master":
         if current_user.role != "ADMIN":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden"
@@ -49,6 +183,10 @@ async def get_specific_files(
 
         all_files = await session.scalars(
             select(File).where(File.type == "MASTER").limit(limit).offset(offset)
+        )
+
+        count = await session.scalar(
+            select(func.count()).select_from(File).where(File.type == "MASTER")
         )
     elif file_id == "query":
         all_files = await session.scalars(
@@ -58,16 +196,33 @@ async def get_specific_files(
             .limit(limit)
             .offset(offset)
         )
+
+        count = await session.scalar(
+            select(func.count())
+            .select_from(File)
+            .where(File.user_id == current_user.id)
+            .where(File.type == "QUERY")
+        )
+
     elif not file_id:
         if current_user.role != "ADMIN":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden"
             )
 
-        all_files = await session.scalars(select(File).limit(limit).offset(offset))
+        all_files = await session.scalars(
+            select(File)
+            .where(or_(File.type == "MASTER", File.type == "QUERY"))
+            .limit(limit)
+            .offset(offset)
+        )
     else:
         file = await session.scalar(
             select(File).where(File.id == file_id).limit(limit).offset(offset)
+        )
+
+        count = await session.scalar(
+            select(func.count()).select_from(File).where(File.id == file_id)
         )
 
         if current_user.id != file.user_id and current_user.role != "ADMIN":
@@ -75,22 +230,27 @@ async def get_specific_files(
                 status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden"
             )
 
-        obj = [
-            x
-            for x in bucket.objects.filter(
-                Prefix=file.type.title() + "/" + file.file_name
+        obj = list(
+            bucket.objects.filter(
+                Prefix=file.type.title() + "/" + f"{file.id}_{file.file_name}"
             )
-        ][0]
+        )
+        obj.extend(
+            list(bucket.objects.filter(Prefix=file.type.title() + "/" + file.file_name))
+        )
+
+        if not obj:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="File not found"
+            )
+
+        obj = obj[0]
 
         url = client.generate_presigned_url(
             "get_object",
             ExpiresIn=3600,
-            Params={"Bucket": "cdn.future-fdn.tech", "Key": obj.key},
+            Params={"Bucket": "storage.future-fdn.tech", "Key": obj.key},
         ).replace("s3.amazonaws.com/", "")
-
-        # versions = client.list_object_versions(
-        #     Bucket="cdn.future-fdn.tech", Prefix=file.type.title() + "/" + file.file_name
-        # )
 
         file = file.to_dict()
         user = await session.scalar(select(User).where(User.id == file["user_id"]))
@@ -98,49 +258,35 @@ async def get_specific_files(
         file["name"] = user.name
 
         file["url"] = url
-        # file["versions"] = [
-        #     {
-        #         "id": "",
-        #         "latest": x["IsLatest"],
-        #         "modified": x["LastModified"],
-        #         "key": x["Key"],
-        #     }
-        #     for x in versions["Versions"]
-        # ]
 
         return file
 
     for file in all_files:
         obj = list(
-            bucket.objects.filter(Prefix=file.type.title() + "/" + file.file_name)
-        )[0]
+            bucket.objects.filter(
+                Prefix=file.type.title() + "/" + f"{file.id}_{file.file_name}"
+            )
+        )
+
+        obj.extend(
+            list(bucket.objects.filter(Prefix=file.type.title() + "/" + file.file_name))
+        )
 
         if not obj:
             continue
 
+        obj = obj[0]
+
         url = client.generate_presigned_url(
             "get_object",
             ExpiresIn=3600,
-            Params={"Bucket": "cdn.future-fdn.tech", "Key": obj.key},
+            Params={"Bucket": "storage.future-fdn.tech", "Key": obj.key},
         ).replace("s3.amazonaws.com/", "")
-
-        # versions = client.list_object_versions(
-        #     Bucket="cdn.future-fdn.tech", Prefix=file.type.title() + "/" + file.file_name
-        # )
 
         file = file.to_dict()
         user = await session.scalar(select(User).where(User.id == file["user_id"]))
 
         file["name"] = user.name
-        # file["versions"] = [
-        #     {
-        #         "id": x["VersionId"],
-        #         "latest": x["IsLatest"],
-        #         "modified": x["LastModified"],
-        #         "key": x["Key"],
-        #     }
-        #     for x in versions["Versions"]
-        # ]
 
         files.append(
             {
@@ -149,35 +295,46 @@ async def get_specific_files(
             }
         )
 
-    return {"files": files, "total": len(files)}
+    return {"files": files, "total": count}
 
 
 @router.delete("/files/{file_id}")
 async def delete_specific_files(
     file_id: UUID | Literal["master", "query"],
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ):
-    if file_id == "master":
+    if file_id == "master" or file_id == "query":
         raise HTTPException(
             status_code=400,
-            detail="Cannot delete master files",
-        )
-    elif file_id == "query":
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot delete query files",
+            detail="Cannot delete files",
         )
     else:
         file = await session.scalar(
             delete(File).where(File.id == file_id).returning(File)
         )
-        await session.commit()
 
         if not file:
             raise HTTPException(
                 status_code=404,
                 detail="File not found",
             )
+
+        if file.type == "MASTER" and current_user.role != "ADMIN":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed"
+            )
+
+        s3.meta.client.delete_object(
+            Bucket=settings.aws_storage_bucket_name,
+            Key=f"{file.type.title()}/{file.file_name}",
+        )
+        s3.meta.client.delete_object(
+            Bucket=settings.aws_storage_bucket_name,
+            Key=f"{file.type.title()}/{file.id}_{file.file_name}",
+        )
+
+        await session.commit()
 
     return {"detail": "Deleted successfully"}
 
@@ -191,38 +348,44 @@ async def get_all_files(
     files = []
     url = None
 
-    all_files = await session.scalars(select(File).limit(limit).offset(offset))
+    all_files = await session.scalars(
+        select(File)
+        .where(or_(File.type == "MASTER", File.type == "QUERY"))
+        .limit(limit)
+        .offset(offset)
+    )
+    count = await session.scalar(
+        select(func.count())
+        .select_from(File)
+        .where(or_(File.type == "MASTER", File.type == "QUERY"))
+    )
 
     for file in all_files:
         obj = list(
-            bucket.objects.filter(Prefix=file.type.title() + "/" + file.file_name)
-        )[0]
+            bucket.objects.filter(
+                Prefix=file.type.title() + "/" + f"{file.id}_{file.file_name}"
+            )
+        )
+
+        obj.extend(
+            list(bucket.objects.filter(Prefix=file.type.title() + "/" + file.file_name))
+        )
 
         if not obj:
             continue
 
+        obj = obj[0]
+
         url = client.generate_presigned_url(
             "get_object",
             ExpiresIn=3600,
-            Params={"Bucket": "cdn.future-fdn.tech", "Key": obj.key},
+            Params={"Bucket": "storage.future-fdn.tech", "Key": obj.key},
         ).replace("s3.amazonaws.com/", "")
-        # versions = client.list_object_versions(
-        #     Bucket="cdn.future-fdn.tech", Prefix=file.type.title() + "/" + file.file_name
-        # )
 
         file = file.to_dict()
         user = await session.scalar(select(User).where(User.id == file["user_id"]))
 
         file["name"] = user.name
-        # file["versions"] = [
-        #     {
-        #         "id": x["VersionId"],
-        #         "latest": x["IsLatest"],
-        #         "modified": x["LastModified"],
-        #         "key": x["Key"],
-        #     }
-        #     for x in versions["Versions"]
-        # ]
 
         files.append(
             {
@@ -231,7 +394,33 @@ async def get_all_files(
             }
         )
 
-    return {"files": files, "total": len(files)}
+    return {"files": files, "total": count}
+
+
+@router.get("/files/{file_id}/columns")
+async def list_columns(
+    file_id: str,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    file = await session.scalar(select(File).where(File.id == file_id))
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found",
+        )
+
+    if file.type == "QUERY" and file.user_id != current_user.id:
+        if current_user.role != "ADMIN":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You cannot access this file",
+            )
+
+    df = read_file(file)
+
+    return {"columns": list(df.columns)}
 
 
 @router.post("/files/{file_id}/map")
@@ -259,33 +448,6 @@ async def map_file(
             detail="Cannot map master file",
         )
 
-    client = aws_session.client("s3")
-
-    def read_file(file: File) -> pd.DataFrame:
-        url = client.generate_presigned_url(
-            "get_object",
-            ExpiresIn=3600,
-            Params={
-                "Bucket": "cdn.future-fdn.tech",
-                "Key": file.type.title() + "/" + file.file_name,
-            },
-        ).replace("s3.amazonaws.com/", "")
-
-        if file.file_name.endswith(".csv"):
-            response = requests.get(url)
-
-            df = pd.read_csv(io.StringIO(response.content.decode("utf-8")))
-        elif file.file_name.endswith(".txt"):
-            response = requests.get(url)
-            df = pd.read_fwf(io.StringIO(response.content.decode("utf-8")), header=None)
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="File type not supported",
-            )
-
-        return df
-
     df = read_file(file)
     master_df = read_file(master_file)
 
@@ -304,18 +466,16 @@ async def map_file(
     await session.commit()
 
     background_tasks.add_task(
-        map_data, df, master_df, query_column, master_column, file
+        map_data, df, master_df, query_column, master_column, file, current_user
     )
 
     return {"detail": "Added to tasks successfully"}
 
 
-async def map_data(df: pd.DataFrame, master_df, query_column, master_column, file):
+async def map_data(
+    df: pd.DataFrame, master_df, query_column, master_column, file, current_user
+):
     session = get_async_session()
-
-    for col in master_df.columns:
-        if col.startswith("Unnamed"):
-            del master_df[col]
 
     if not master_df.columns.isin(
         [master_column if not master_column.isnumeric() else int(master_column)]
@@ -411,14 +571,28 @@ async def map_data(df: pd.DataFrame, master_df, query_column, master_column, fil
     buffer = io.BytesIO(resulting_df.to_csv(index=False).encode())
     client.upload_fileobj(
         buffer,
-        "cdn.future-fdn.tech",
+        "storage.future-fdn.tech",
         "result" + "/" + file.file_name,
     )
+
+    result_file = await session.scalar(
+        insert(File)
+        .values(
+            file_name=file.file_name,
+            user_id=current_user.id,
+            description="",
+            unique=0,
+            valid=0,
+            type="RESULT",
+        )
+        .returning(File)
+    )
+    await session.commit()
 
     await session.scalar(
         update(Task)
         .where(Task.file_id == file.id)
-        .values(ended=datetime.now(), status="COMPLETED")
+        .values(ended=datetime.now(), status="COMPLETED", file_id=result_file.id)
         .returning(Task)
     )
 
@@ -428,26 +602,38 @@ async def map_data(df: pd.DataFrame, master_df, query_column, master_column, fil
     del master_df
 
 
-# @router.post(
-#     "/files",
-#     status_code=status.HTTP_201_CREATED,
-# )
-# async def create_file_object(
-#     file: UploadFile, session: AsyncSession = Depends(get_session)
-# ):
-# ...
-# try:
-#     contents = await file.read()
-#     async with aiofiles.open(file.filename, 'wb') as f:
-#         await f.write(contents)
-# except Exception:
-#     raise HTTPException(
-#         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-#         detail='There was an error uploading the file',
-#     )
-# finally:
-#     await file.close()
+@router.post(
+    "/files",
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_file_object(
+    file_name: Annotated[str, Form()],
+    file_type: Annotated[Literal["QUERY", "MASTER"], Form()],
+    description: Annotated[str, Form()] = "",
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    if file_type == "MASTER" and current_user.role != "ADMIN":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed")
 
-# file_name = file.filename
+    file = await session.scalar(
+        insert(File)
+        .values(
+            file_name=file_name,
+            user_id=current_user.id,
+            description=description,
+            unique=0,
+            valid=0,
+            type=file_type,
+        )
+        .returning(File)
+    )
 
-# file = await session.scalar(insert(File) )
+    await session.commit()
+
+    upload_detail = client.generate_presigned_post(
+        "storage.future-fdn.tech", file_type.title() + "/" + f"{file.id}_{file_name}"
+    )
+    upload_detail.update({"url": "https://storage.future-fdn.tech"})
+
+    return {"upload_detail": upload_detail, "file_id": file.id}
