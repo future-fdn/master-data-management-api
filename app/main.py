@@ -57,7 +57,7 @@ class SchedulerService:
                 query = await session.scalar(
                     select(func.sum(File.total))
                     .select_from(File)
-                    .where(File.type == "MASTER")
+                    .where(File.type == "QUERY")
                 )
 
                 overall_uniqueness = unique / total
