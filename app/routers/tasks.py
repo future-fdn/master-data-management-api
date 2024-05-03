@@ -1,4 +1,5 @@
 import io
+import re
 from typing import Annotated
 from uuid import UUID
 
@@ -44,7 +45,11 @@ async def get_all_tasks(
         user = await session.scalar(select(User).where(task.user_id == User.id))
 
         task = task.to_dict()
-        task["file_name"] = file.file_name
+        task["file_name"] = re.sub(
+            r"[a-z0-9]{8}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{12}_",
+            "",
+            file.file_name,
+        )
         task["user_name"] = user.name
 
         task["url"] = client.generate_presigned_url(
