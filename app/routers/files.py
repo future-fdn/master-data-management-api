@@ -642,12 +642,15 @@ async def create_file_object(
         )
         .returning(File)
     )
+    file = await session.scalar(
+        update(File).values(file_name=f"{file.id}_{file_name}").returning(File)
+    )
 
     await session.commit()
 
     upload_detail = client.generate_presigned_post(
         settings.aws_storage_bucket_name,
-        file_type.title() + "/" + f"{file.id}_{file_name}",
+        file_type.title() + "/" + file.file_name,
     )
     upload_detail.update({"url": "https://storage.future-fdn.tech"})
 
