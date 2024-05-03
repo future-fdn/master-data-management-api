@@ -292,6 +292,7 @@ async def get_specific_files(
         user = await session.scalar(select(User).where(User.id == file["user_id"]))
 
         file["name"] = user.name
+        file["file_name"] = file["file_name"].replace(file["id"] + "_", "")
 
         file["url"] = url
 
@@ -311,6 +312,7 @@ async def get_specific_files(
         user = await session.scalar(select(User).where(User.id == file["user_id"]))
 
         file["name"] = user.name
+        file["file_name"] = file["file_name"].replace(file["id"] + "_", "")
 
         files.append(
             {
@@ -398,6 +400,7 @@ async def get_all_files(
         user = await session.scalar(select(User).where(User.id == file["user_id"]))
 
         file["name"] = user.name
+        file["file_name"] = file["file_name"].replace(file["id"] + "_", "")
 
         files.append(
             {
