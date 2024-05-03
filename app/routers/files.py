@@ -643,7 +643,10 @@ async def create_file_object(
         .returning(File)
     )
     file = await session.scalar(
-        update(File).values(file_name=f"{file.id}_{file_name}").returning(File)
+        update(File)
+        .where(File.id == file.id)
+        .values(file_name=f"{file.id}_{file_name}")
+        .returning(File)
     )
 
     await session.commit()
