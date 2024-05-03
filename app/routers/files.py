@@ -35,7 +35,7 @@ aws_session = boto3.Session(
 
 s3 = aws_session.resource("s3")
 client = aws_session.client("s3")  # , endpoint_url="https://cdn.future-fdn.tech")
-bucket = s3.Bucket("storage.future-fdn.tech")
+bucket = s3.Bucket(settings.aws_storage_bucket_name)
 
 
 def read_file(file: File, is_csv=None) -> pd.DataFrame:
@@ -43,34 +43,19 @@ def read_file(file: File, is_csv=None) -> pd.DataFrame:
         "get_object",
         ExpiresIn=3600,
         Params={
-            "Bucket": "storage.future-fdn.tech",
+            "Bucket": settings.aws_storage_bucket_name,
             "Key": file.type.title() + "/" + file.file_name
             if file.type.lower() != "result"
             else file.type.lower() + "/" + file.file_name,
         },
     ).replace("s3.amazonaws.com/", "")
 
-    new_url = client.generate_presigned_url(
-        "get_object",
-        ExpiresIn=3600,
-        Params={
-            "Bucket": "storage.future-fdn.tech",
-            "Key": file.type.title() + "/" + f"{file.id}_{file.file_name}"
-            if file.type.lower() != "result"
-            else file.type.lower() + "/" + f"{file.id}_{file.file_name}",
-        },
-    ).replace("s3.amazonaws.com/", "")
-
     if file.file_name.endswith(".csv") or is_csv:
         response = requests.get(url)
-        if not response.ok:
-            response = requests.get(url)
 
         df = pd.read_csv(io.StringIO(response.content.decode("utf-8")))
     elif file.file_name.endswith(".txt"):
         response = requests.get(url)
-        if not response.ok:
-            response = requests.get(url)
         df = pd.read_fwf(io.StringIO(response.content.decode("utf-8")), header=None)
     else:
         raise HTTPException(
@@ -97,11 +82,66 @@ async def get_specific_files(
 
     if file_id == "stats":
         date = datetime.now().replace(day=1).date()
-        date_minus_one = (
-            (datetime.now() - timedelta(days=datetime.now().day)).replace(day=1).date()
+        date_minus_one = (datetime.now() - timedelta(days=datetime.now().day)).replace(
+            day=1
         )
 
         info = await session.scalar(select(DataQuality).where(DataQuality.date == date))
+        query_count = await session.scalar(
+            select(func.count())
+            .select_from(File)
+            .where(File.user_id == current_user.id)
+            .where(File.type == "QUERY")
+            .where(
+                File.created
+                >= datetime.now().replace(
+                    day=1, hour=0, minute=0, second=0, microsecond=0
+                )
+            )
+        )
+
+        if not info:
+            info = await session.scalar(
+                select(DataQuality).where(
+                    DataQuality.date
+                    == (date_minus_one - timedelta(days=date_minus_one.day))
+                    .replace(day=1)
+                    .date()
+                )
+            )
+            if not info:
+                return_values = {
+                    "overall_uniqueness": format(0.0, "00.0f") + "%",
+                    "overall_completeness": format(0.0, "00.0f") + "%",
+                    "total_query_records": 0,
+                    "total_master_records": 0,
+                    "uniqueness_diff": format(
+                        0.0,
+                        "00.0f",
+                    )
+                    + "%",
+                    "completeness_diff": format(
+                        0.0,
+                        "00.0f",
+                    )
+                    + "%",
+                    "query_records_diff": 0,
+                    "master_records_diff": 0,
+                    "this_month_query_data": query_count,
+                }
+
+                return_values.update(
+                    {
+                        "uniqueness_diff": "+" + return_values["uniqueness_diff"]
+                        if not return_values["uniqueness_diff"].startswith("-")
+                        else return_values["uniqueness_diff"],
+                        "completeness_diff": "+" + return_values["completeness_diff"]
+                        if not return_values["uniqueness_diff"].startswith("-")
+                        else return_values["uniqueness_diff"],
+                    }
+                )
+
+                return return_values
 
         return_values = {
             "overall_uniqueness": format((info.overall_uniqueness) * 100.0, "00.0f")
@@ -113,7 +153,7 @@ async def get_specific_files(
         }
 
         info_previous = await session.scalar(
-            select(DataQuality).where(DataQuality.date == date_minus_one)
+            select(DataQuality).where(DataQuality.date == date_minus_one.date())
         )
 
         if info_previous:
@@ -140,10 +180,10 @@ async def get_specific_files(
         else:
             return_values.update(
                 {
-                    "uniqueness_diff": "0%",
-                    "completeness_diff": "0%",
-                    "query_records_diff": 0,
-                    "master_records_diff": 0,
+                    "uniqueness_diff": "100%",
+                    "completeness_diff": "100%",
+                    "query_records_diff": info.total_master_records,
+                    "master_records_diff": info.total_master_records,
                 }
             )
 
@@ -155,11 +195,11 @@ async def get_specific_files(
                 "completeness_diff": "+" + return_values["completeness_diff"]
                 if not return_values["uniqueness_diff"].startswith("-")
                 else return_values["uniqueness_diff"],
-                "query_records_diff": 0,
-                "master_records_diff": 0,
+                "this_month_query_data": query_count,
             }
         )
         return return_values
+
     elif file_id == "graph":
         date = datetime.now() - timedelta(days=365)
         date = date.replace(day=1)
@@ -191,7 +231,6 @@ async def get_specific_files(
         return {"datas": return_list}
 
     elif file_id == "master":
-        print("sdfsdf")
         all_files = await session.scalars(
             select(File).where(File.type == "MASTER").limit(limit).offset(offset)
         )
@@ -241,26 +280,13 @@ async def get_specific_files(
                 status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden"
             )
 
-        obj = list(
-            bucket.objects.filter(
-                Prefix=file.type.title() + "/" + f"{file.id}_{file.file_name}"
-            )
-        )
-        obj.extend(
-            list(bucket.objects.filter(Prefix=file.type.title() + "/" + file.file_name))
-        )
-
-        if not obj:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="File not found"
-            )
-
-        obj = obj[0]
-
         url = client.generate_presigned_url(
             "get_object",
             ExpiresIn=3600,
-            Params={"Bucket": "storage.future-fdn.tech", "Key": obj.key},
+            Params={
+                "Bucket": settings.aws_storage_bucket_name,
+                "Key": file.type.title() + "/" + file.file_name,
+            },
         ).replace("s3.amazonaws.com/", "")
 
         file = file.to_dict()
@@ -273,25 +299,13 @@ async def get_specific_files(
         return file
 
     for file in all_files:
-        obj = list(
-            bucket.objects.filter(
-                Prefix=file.type.title() + "/" + f"{file.id}_{file.file_name}"
-            )
-        )
-
-        obj.extend(
-            list(bucket.objects.filter(Prefix=file.type.title() + "/" + file.file_name))
-        )
-
-        if not obj:
-            continue
-
-        obj = obj[0]
-
         url = client.generate_presigned_url(
             "get_object",
             ExpiresIn=3600,
-            Params={"Bucket": "storage.future-fdn.tech", "Key": obj.key},
+            Params={
+                "Bucket": settings.aws_storage_bucket_name,
+                "Key": file.type.title() + "/" + file.file_name,
+            },
         ).replace("s3.amazonaws.com/", "")
 
         file = file.to_dict()
@@ -372,25 +386,13 @@ async def get_all_files(
     )
 
     for file in all_files:
-        obj = list(
-            bucket.objects.filter(
-                Prefix=file.type.title() + "/" + f"{file.id}_{file.file_name}"
-            )
-        )
-
-        obj.extend(
-            list(bucket.objects.filter(Prefix=file.type.title() + "/" + file.file_name))
-        )
-
-        if not obj:
-            continue
-
-        obj = obj[0]
-
         url = client.generate_presigned_url(
             "get_object",
             ExpiresIn=3600,
-            Params={"Bucket": "storage.future-fdn.tech", "Key": obj.key},
+            Params={
+                "Bucket": settings.aws_storage_bucket_name,
+                "Key": file.type.title() + "/" + file.file_name,
+            },
         ).replace("s3.amazonaws.com/", "")
 
         file = file.to_dict()
@@ -582,18 +584,19 @@ async def map_data(
     buffer = io.BytesIO(resulting_df.to_csv(index=False).encode())
     client.upload_fileobj(
         buffer,
-        "storage.future-fdn.tech",
-        "result" + "/" + file.file_name,
+        settings.aws_storage_bucket_name,
+        "result" + "/" + f"{file.id}_{file.file_name}",
     )
 
     result_file = await session.scalar(
         insert(File)
         .values(
-            file_name=file.file_name,
+            file_name=f"{file.id}_{file.file_name}",
             user_id=current_user.id,
             description="",
             unique=0,
             valid=0,
+            total=0,
             type="RESULT",
         )
         .returning(File)
@@ -635,6 +638,7 @@ async def create_file_object(
             description=description,
             unique=0,
             valid=0,
+            total=0,
             type=file_type,
         )
         .returning(File)
@@ -643,8 +647,62 @@ async def create_file_object(
     await session.commit()
 
     upload_detail = client.generate_presigned_post(
-        "storage.future-fdn.tech", file_type.title() + "/" + f"{file.id}_{file_name}"
+        settings.aws_storage_bucket_name,
+        file_type.title() + "/" + f"{file.id}_{file_name}",
     )
     upload_detail.update({"url": "https://storage.future-fdn.tech"})
 
     return {"upload_detail": upload_detail, "file_id": file.id}
+
+
+@router.patch(
+    "/files/{file_id}",
+    status_code=status.HTTP_201_CREATED,
+)
+async def patch_file(
+    file_id: str,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    file = await session.scalar(select(File).where(File.id == file_id))
+
+    if file.type == "MASTER" and current_user.role != "ADMIN":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed")
+
+    url = client.generate_presigned_url(
+        "get_object",
+        ExpiresIn=3600,
+        Params={
+            "Bucket": settings.aws_storage_bucket_name,
+            "Key": file.type.title() + "/" + file.file_name,
+        },
+    ).replace("s3.amazonaws.com/", "")
+
+    if file.file_name.endswith(".csv"):
+        response = requests.get(url)
+
+        df = pd.read_csv(
+            io.StringIO(response.content.decode("utf-8")), on_bad_lines="skip"
+        )
+    elif file.file_name.endswith(".txt"):
+        response = requests.get(url)
+        df = pd.read_fwf(
+            io.StringIO(response.content.decode("utf-8")),
+            header=None,
+            on_bad_lines="skip",
+        )
+
+    total_unique_values = df.nunique().sum()
+    total_non_na = df.count().sum()
+    total = df.size
+
+    await session.scalar(
+        update(File)
+        .values(unique=total_unique_values, valid=total_non_na, total=total)
+        .where(File.id == file.id)
+        .returning(File)
+    )
+
+    await session.commit()
+
+    return {"detail": "Success!"}

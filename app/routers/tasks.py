@@ -1,17 +1,23 @@
+import io
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Form, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db import get_session
 from app.models.file import File
 from app.models.task import Task, TaskResponse, TasksResponse
 from app.models.user import User
-from app.routers.files import client, read_file
+from app.routers.files import client, read_file, s3
 from app.services.auth import get_current_user
 
 router = APIRouter()
+
+
+settings = get_settings()
 
 
 @router.get("/tasks", response_model=TasksResponse)
@@ -45,7 +51,7 @@ async def get_all_tasks(
             "get_object",
             ExpiresIn=3600,
             Params={
-                "Bucket": "storage.future-fdn.tech",
+                "Bucket": settings.aws_storage_bucket_name,
                 "Key": file.type.title()
                 if file.type.lower() != "result"
                 else file.type.lower() + "/" + file.file_name,
@@ -81,7 +87,7 @@ async def get_task(
         "get_object",
         ExpiresIn=3600,
         Params={
-            "Bucket": "storage.future-fdn.tech",
+            "Bucket": settings.aws_storage_bucket_name,
             "Key": file.type.title()
             if file.type.lower() != "result"
             else file.type.lower() + "/" + file.file_name,
@@ -115,7 +121,7 @@ async def get_versions(
         )
 
     versions = client.list_object_versions(
-        Bucket="storage.future-fdn.tech",
+        Bucket=settings.aws_storage_bucket_name,
         Prefix="result" + "/" + file.file_name,
     )
 
@@ -178,3 +184,119 @@ async def get_data(
         "nodes": nodes,
         "links": links,
     }
+
+
+@router.get("/tasks/{task_id}/table")
+async def get_data_table(
+    task_id: UUID,
+    session: AsyncSession = Depends(get_session),
+):
+    task = await session.scalar(select(Task).where(Task.id == task_id))
+
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task not found",
+        )
+
+    file = await session.scalar(select(File).where(File.id == task.file_id))
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="File not found",
+        )
+
+    data = read_file(file, is_csv=True)
+
+    return data.to_dict(orient="records")
+
+
+@router.put("/tasks/{task_id}")
+async def edit_task(
+    task_id: UUID,
+    source: Annotated[str, Form()],
+    destination: Annotated[str, Form()],
+    session: AsyncSession = Depends(get_session),
+):
+    task = await session.scalar(select(Task).where(Task.id == task_id))
+
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task not found",
+        )
+
+    file = await session.scalar(select(File).where(File.id == task.file_id))
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="File not found",
+        )
+
+    df = read_file(file, is_csv=True)
+
+    df.loc[
+        (df["source"] == source),
+        ["full", "partial"],
+    ] = 100
+
+    df.loc[
+        (df["source"] == source),
+        ["destination"],
+    ] = destination
+
+    buffer = io.BytesIO(df.to_csv(index=False).encode())
+    client.upload_fileobj(
+        buffer,
+        settings.aws_storage_bucket_name,
+        "result" + "/" + f"{file.file_name}",
+    )
+
+    return {"detail": "Success!"}
+
+
+@router.patch("/tasks/{task_id}/versions")
+async def revert_version(
+    task_id: UUID,
+    version_id: Annotated[str, Form()],
+    session: AsyncSession = Depends(get_session),
+):
+    task = await session.scalar(select(Task).where(Task.id == task_id))
+
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task not found",
+        )
+
+    file = await session.scalar(select(File).where(File.id == task.file_id))
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="File not found",
+        )
+
+    versions = s3.meta.client.list_object_versions(
+        Bucket=settings.aws_storage_bucket_name, Prefix=f"result/{file.file_name}"
+    ).get("Versions", [])
+
+    s3.meta.client.copy(
+        {
+            "Bucket": settings.aws_storage_bucket_name,
+            "Key": versions[0]["Key"],
+            "VersionId": version_id,
+        },
+        settings.aws_storage_bucket_name,
+        versions[0]["Key"],
+    )
+
+    s3.meta.client.delete_object(
+        Bucket=settings.aws_storage_bucket_name,
+        Key=f"result/{file.file_name}",
+        VersionId=version_id,
+    )
+
+    return {"detail": "Success!"}

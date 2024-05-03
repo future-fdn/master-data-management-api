@@ -34,6 +34,7 @@ class File(Base):
     description: Mapped[str] = mapped_column(String(100), nullable=False)
     unique: Mapped[int] = mapped_column(Integer(), nullable=False)
     valid: Mapped[int] = mapped_column(Integer(), nullable=False)
+    total: Mapped[int] = mapped_column(Integer(), nullable=False)
     type: Mapped[Type] = mapped_column(
         Enum("MASTER", "QUERY", "RESULT", name="file_type"), nullable=False
     )
@@ -49,8 +50,7 @@ class DataQuality(DQBase):
     __tablename__ = "data_quality"
 
     date: Mapped[Date] = mapped_column(
-        Date(),
-        primary_key=True,
+        Date(), primary_key=True, unique=True, nullable=False
     )
     overall_uniqueness: Mapped[float] = mapped_column(Float())
     overall_completeness: Mapped[float] = mapped_column(Float())
@@ -75,6 +75,7 @@ class FileResponse(BaseModel):
     user_id: str
     unique: int
     valid: int
+    total: int
     type: str
     created: datetime
     modified: datetime
@@ -90,6 +91,7 @@ class FileStats(BaseModel):
     query_records_diff: int
     total_master_records: int
     master_records_diff: int
+    this_month_query_data: int
 
 
 class FilesResponse(BaseModel):

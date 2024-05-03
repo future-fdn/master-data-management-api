@@ -2,12 +2,9 @@
 name = "master-data-management-api"
 version = "0.1.0"
 description = "Default template for PDM package"
-authors = [
-    {name = "Tinn-K", email = "tinn.kanjananuwat@gmail.com"},
-]
+authors = [{ name = "Tinn-K", email = "tinn.kanjananuwat@gmail.com" }]
 dependencies = [
-    "pydantic-settings>=2.2.1",
-    "sqlalchemy>=2.0.28",
+    "sqlalchemy>=2.0.0",
     "alembic>=1.13.1",
     "asyncpg>=0.29.0",
     "greenlet>=3.0.3",
@@ -20,10 +17,13 @@ dependencies = [
     "pandas>=2.2.1",
     "python-multipart>=0.0.9",
     "requests>=2.31.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.2.1",
+    "apscheduler>=3.10.4",
 ]
 requires-python = "==3.11.*"
 readme = "README.md"
-license = {text = "MIT"}
+license = { text = "MIT" }
 
 
 [tool.pdm]
