@@ -135,7 +135,11 @@ async def get_versions(
             "id": x["VersionId"],
             "latest": x["IsLatest"],
             "modified": x["LastModified"],
-            "key": x["Key"],
+            "key": re.sub(
+                r"[a-z0-9]{8}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{12}_",
+                "",
+                x["Key"],
+            ),
         }
         for x in versions["Versions"]
     ]
