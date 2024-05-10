@@ -171,7 +171,8 @@ async def get_specific_files(
                         "00.0f",
                     )
                     + "%",
-                    "query_records_diff": 0,
+                    "query_records_diff": info.total_query_records
+                    - info_previous.total_query_records,
                     "master_records_diff": info.total_master_records
                     - info_previous.total_master_records,
                 }
@@ -181,7 +182,7 @@ async def get_specific_files(
                 {
                     "uniqueness_diff": "100%",
                     "completeness_diff": "100%",
-                    "query_records_diff": 0,
+                    "query_records_diff": info.total_query_records,
                     "master_records_diff": info.total_master_records,
                 }
             )
